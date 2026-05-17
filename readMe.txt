@@ -1,0 +1,1 @@
+pnpm --filter @workspace/air-quality-monitor run dev

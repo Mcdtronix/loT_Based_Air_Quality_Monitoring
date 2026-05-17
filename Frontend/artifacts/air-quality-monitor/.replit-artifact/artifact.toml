@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/"
+title = "AirGuard - Air Quality Monitor"
+version = "1.0.0"
+id = "artifacts/air-quality-monitor"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+name = "expo"
+paths = [ "/" ]
+localPort = 25776
+
+[services.development]
+run = "pnpm --filter @workspace/air-quality-monitor run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/air-quality-monitor", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/air-quality-monitor", "run", "serve" ]
+
+[services.env]
+PORT = "25776"
+BASE_PATH = "/"
