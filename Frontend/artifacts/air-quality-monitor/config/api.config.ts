@@ -1,5 +1,5 @@
 // Environment configuration
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || 'https://airmonitor.mcdtronix.co.zw';
 const API_ENDPOINT = `${API_BASE_URL}/api`;
 
 export const API_CONFIG = {
