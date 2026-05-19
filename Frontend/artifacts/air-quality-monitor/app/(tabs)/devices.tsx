@@ -1,10 +1,14 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   StyleSheet,
   FlatList,
   TouchableOpacity,
   ActivityIndicator,
+  Modal,
+  TextInput,
+  Alert,
+  Pressable,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
@@ -34,6 +38,8 @@ interface DeviceItemProps {
     timestamp: string;
   } | null;
   onPress: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
   isSelected: boolean;
 }
 
@@ -44,6 +50,8 @@ function DeviceItem({
   status,
   last_reading,
   onPress,
+  onEdit,
+  onDelete,
   isSelected,
 }: DeviceItemProps) {
   const isOnline = status === "online";
@@ -70,15 +78,33 @@ function DeviceItem({
           </ThemedText>
           <ThemedText style={styles.deviceId}>{device_id}</ThemedText>
         </View>
-        <View
-          style={[
-            styles.statusBadge,
-            { backgroundColor: isOnline ? COLORS.success : COLORS.textSecondary },
-          ]}
-        >
-          <ThemedText style={styles.statusText}>
-            {isOnline ? "Online" : "Offline"}
-          </ThemedText>
+        <View style={styles.statusAndActions}>
+          <View
+            style={[
+              styles.statusBadge,
+              { backgroundColor: isOnline ? COLORS.success : COLORS.textSecondary },
+            ]}
+          >
+            <ThemedText style={styles.statusText}>
+              {isOnline ? "Online" : "Offline"}
+            </ThemedText>
+          </View>
+          <View style={styles.actionButtons}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={onEdit}
+              activeOpacity={0.6}
+            >
+              <ThemedText style={styles.actionButtonText}>✏️</ThemedText>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.deleteButton]}
+              onPress={onDelete}
+              activeOpacity={0.6}
+            >
+              <ThemedText style={styles.actionButtonText}>🗑️</ThemedText>
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
 
@@ -111,16 +137,146 @@ function DeviceItem({
   );
 }
 
+interface EditDeviceModalProps {
+  visible: boolean;
+  deviceName: string;
+  onDismiss: () => void;
+  onSave: (newName: string) => void;
+  isLoading: boolean;
+}
+
+function EditDeviceModal({
+  visible,
+  deviceName,
+  onDismiss,
+  onSave,
+  isLoading,
+}: EditDeviceModalProps) {
+  const [newName, setNewName] = useState(deviceName);
+
+  useEffect(() => {
+    setNewName(deviceName);
+  }, [deviceName]);
+
+  const handleSave = () => {
+    if (newName.trim().length === 0) {
+      Alert.alert("Error", "Device name cannot be empty");
+      return;
+    }
+    onSave(newName);
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onDismiss}
+    >
+      <Pressable style={styles.modalOverlay} onPress={onDismiss}>
+        <Pressable style={styles.modalContent} onPress={(e) => e.stopPropagation()}>
+          <ThemedText style={styles.modalTitle}>Edit Device Name</ThemedText>
+
+          <TextInput
+            style={styles.textInput}
+            placeholder="Enter device name"
+            placeholderTextColor={COLORS.textSecondary}
+            value={newName}
+            onChangeText={setNewName}
+            editable={!isLoading}
+            maxLength={100}
+          />
+
+          <View style={styles.modalActions}>
+            <TouchableOpacity
+              style={[styles.modalButton, styles.cancelButton]}
+              onPress={onDismiss}
+              disabled={isLoading}
+            >
+              <ThemedText style={styles.cancelButtonText}>Cancel</ThemedText>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalButton, styles.saveButton]}
+              onPress={handleSave}
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <ActivityIndicator size="small" color={COLORS.card} />
+              ) : (
+                <ThemedText style={styles.saveButtonText}>Save</ThemedText>
+              )}
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
 export default function DevicesScreen() {
-  const { devices, selectedDevice, selectDevice, loadDevices, isLoading, error } =
-    useDevice();
+  const {
+    devices,
+    selectedDevice,
+    selectDevice,
+    loadDevices,
+    updateDevice,
+    deleteDevice,
+    isLoading,
+    error,
+  } = useDevice();
   const { isAuthenticated } = useAuth();
+  const [editingDevice, setEditingDevice] = useState<{
+    id: number;
+    name: string;
+  } | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
 
   useEffect(() => {
     if (isAuthenticated) {
       loadDevices();
     }
   }, [isAuthenticated]);
+
+  const handleEditDevice = (device: { id: number; device_name: string }) => {
+    setEditingDevice({ id: device.id, name: device.device_name });
+  };
+
+  const handleSaveEditDevice = async (newName: string) => {
+    if (!editingDevice) return;
+
+    try {
+      setIsUpdating(true);
+      await updateDevice(editingDevice.id, { device_name: newName });
+      setEditingDevice(null);
+      Alert.alert("Success", "Device updated successfully");
+    } catch (err) {
+      Alert.alert("Error", "Failed to update device");
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleDeleteDevice = (device: { id: number; device_name: string }) => {
+    Alert.alert(
+      "Delete Device",
+      `Are you sure you want to delete "${device.device_name}"? This action cannot be undone.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteDevice(device.id);
+              Alert.alert("Success", "Device deleted successfully");
+            } catch (err) {
+              Alert.alert("Error", "Failed to delete device");
+            }
+          },
+        },
+      ]
+    );
+  };
 
   if (!isAuthenticated) {
     return (
@@ -205,6 +361,8 @@ export default function DevicesScreen() {
               selectDevice(item);
               router.push("/(tabs)/dashboard");
             }}
+            onEdit={() => handleEditDevice(item)}
+            onDelete={() => handleDeleteDevice(item)}
             isSelected={selectedDevice?.id === item.id}
           />
         )}
@@ -218,6 +376,14 @@ export default function DevicesScreen() {
             <ThemedText style={styles.addDeviceText}>+ Add Device</ThemedText>
           </TouchableOpacity>
         }
+      />
+
+      <EditDeviceModal
+        visible={editingDevice !== null}
+        deviceName={editingDevice?.name ?? ""}
+        onDismiss={() => setEditingDevice(null)}
+        onSave={handleSaveEditDevice}
+        isLoading={isUpdating}
       />
     </SafeAreaView>
   );
@@ -276,6 +442,11 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontFamily: "monospace",
   },
+  statusAndActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   statusBadge: {
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -285,6 +456,27 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
     color: COLORS.card,
+  },
+  actionButtons: {
+    flexDirection: "row",
+    gap: 6,
+  },
+  actionButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 6,
+    backgroundColor: COLORS.background,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  deleteButton: {
+    borderColor: COLORS.error,
+    backgroundColor: "#fff5f5",
+  },
+  actionButtonText: {
+    fontSize: 16,
   },
   readingContainer: {
     flexDirection: "row",
@@ -370,6 +562,72 @@ const styles = StyleSheet.create({
   retryButtonText: {
     color: COLORS.card,
     fontSize: 16,
+    fontWeight: "600",
+  },
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 16,
+  },
+  modalContent: {
+    backgroundColor: COLORS.card,
+    borderRadius: 12,
+    padding: 24,
+    width: "100%",
+    maxWidth: 400,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: COLORS.text,
+    marginBottom: 16,
+  },
+  textInput: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: COLORS.text,
+    marginBottom: 24,
+    backgroundColor: COLORS.background,
+  },
+  modalActions: {
+    flexDirection: "row",
+    gap: 12,
+    justifyContent: "flex-end",
+  },
+  modalButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 6,
+    minWidth: 80,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  cancelButton: {
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  cancelButtonText: {
+    color: COLORS.text,
+    fontWeight: "600",
+  },
+  saveButton: {
+    backgroundColor: COLORS.primary,
+  },
+  saveButtonText: {
+    color: COLORS.card,
     fontWeight: "600",
   },
 });

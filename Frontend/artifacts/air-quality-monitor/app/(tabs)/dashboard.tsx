@@ -62,8 +62,10 @@ export default function DashboardScreen() {
     loadReadings,
     isLoading,
     error,
+    getDeviceOnlineStatus,
   } = useDevice();
   const [refreshing, setRefreshing] = React.useState(false);
+  const [deviceStatus, setDeviceStatus] = React.useState<"online" | "offline">("offline");
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -78,6 +80,17 @@ export default function DashboardScreen() {
       router.replace("/(tabs)/devices");
     }
   }, [selectedDevice]);
+
+  useEffect(() => {
+    if (selectedDevice) {
+      const updateStatus = () => {
+        setDeviceStatus(getDeviceOnlineStatus(selectedDevice) ? "online" : "offline");
+      };
+      updateStatus();
+      const interval = setInterval(updateStatus, 1000);
+      return () => clearInterval(interval);
+    }
+  }, [selectedDevice, getDeviceOnlineStatus]);
 
   if (!selectedDevice) {
     return (
@@ -137,6 +150,49 @@ export default function DashboardScreen() {
             {selectedDevice.device_name}
           </Text>
           <View style={{ width: 40 }} />
+        </View>
+
+        {/* Device Status Banner */}
+        <View
+          style={[
+            styles.statusBanner,
+            {
+              backgroundColor:
+                deviceStatus === "online"
+                  ? "#dcfce7"
+                  : "#f5f5f5",
+            },
+          ]}
+        >
+          <View
+            style={[
+              styles.statusIndicator,
+              {
+                backgroundColor:
+                  deviceStatus === "online" ? COLORS.success : COLORS.textSecondary,
+              },
+            ]}
+          />
+          <View style={styles.statusInfo}>
+            <Text
+              style={[
+                styles.statusLabel,
+                {
+                  color:
+                    deviceStatus === "online"
+                      ? COLORS.success
+                      : COLORS.textSecondary,
+                },
+              ]}
+            >
+              {deviceStatus === "online" ? "Device Online" : "Device Offline"}
+            </Text>
+            {selectedDevice.last_updated && (
+              <Text style={styles.statusTime}>
+                Last update: {new Date(selectedDevice.last_updated).toLocaleTimeString()}
+              </Text>
+            )}
+          </View>
         </View>
 
         {/* AQI Gauge */}
@@ -511,5 +567,34 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.error + "20",
     borderRadius: 8,
     padding: 12,
+  },
+  statusBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginHorizontal: 16,
+    marginVertical: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderRadius: 8,
+    gap: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  statusIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  statusInfo: {
+    flex: 1,
+  },
+  statusLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    marginBottom: 2,
+  },
+  statusTime: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
   },
 });

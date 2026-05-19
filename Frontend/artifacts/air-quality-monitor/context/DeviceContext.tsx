@@ -37,6 +37,9 @@ interface DeviceContextValue {
   loadAlerts: () => Promise<void>;
   refreshData: () => Promise<void>;
   createDevice: (data: { device_id: string; device_name: string }) => Promise<void>;
+  updateDevice: (deviceId: number, data: { device_name: string }) => Promise<void>;
+  deleteDevice: (deviceId: number) => Promise<void>;
+  getDeviceOnlineStatus: (device: Device) => boolean;
   markAlertRead: (alertId: number) => Promise<void>;
   markAllAlertsRead: () => Promise<void>;
 }
@@ -45,6 +48,7 @@ const DeviceContext = createContext<DeviceContextValue | undefined>(undefined);
 const LIVE_REFRESH_INTERVAL_MS = 2000;
 const LIVE_REFRESH_BACKOFF_MS = 15000;
 const LIVE_REFRESH_FAILURES_BEFORE_BACKOFF = 3;
+const DEVICE_OFFLINE_THRESHOLD_MS = 5000; // 5 seconds without data = offline
 
 function getAqiMeta(aqi: number): { level: string; color: string } {
   if (aqi <= 50) return { level: "Good", color: "#22c55e" };
@@ -53,6 +57,17 @@ function getAqiMeta(aqi: number): { level: string; color: string } {
   if (aqi <= 200) return { level: "Unhealthy", color: "#ef4444" };
   if (aqi <= 300) return { level: "Very Unhealthy", color: "#a855f7" };
   return { level: "Hazardous", color: "#7c3aed" };
+}
+
+/**
+ * Determines device online status based on last_updated timestamp.
+ * Device is considered offline if no data received in the last 5 seconds.
+ */
+function isDeviceOnlineStatus(device: Device | null): boolean {
+  if (!device?.last_updated) return false;
+  const lastUpdatedTime = new Date(device.last_updated).getTime();
+  const timeSinceLastUpdate = Date.now() - lastUpdatedTime;
+  return timeSinceLastUpdate <= DEVICE_OFFLINE_THRESHOLD_MS;
 }
 
 export function DeviceProvider({ children }: { children: React.ReactNode }) {
@@ -178,6 +193,42 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     [loadDevices, withTokenRefresh],
   );
 
+  const updateDevice = useCallback(
+    async (deviceId: number, data: { device_name: string }) => {
+      try {
+        setError(null);
+        const updated = await withTokenRefresh((token) => deviceApi.update(token, deviceId, data));
+        setDevices((currentDevices) =>
+          currentDevices.map((device) => (device.id === deviceId ? updated : device))
+        );
+        setSelectedDevice((currentSelected) =>
+          currentSelected?.id === deviceId ? updated : currentSelected
+        );
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to update device");
+        throw err;
+      }
+    },
+    [withTokenRefresh],
+  );
+
+  const deleteDevice = useCallback(
+    async (deviceId: number) => {
+      try {
+        setError(null);
+        await withTokenRefresh((token) => deviceApi.delete(token, deviceId));
+        setDevices((currentDevices) => currentDevices.filter((device) => device.id !== deviceId));
+        setSelectedDevice((currentSelected) =>
+          currentSelected?.id === deviceId ? null : currentSelected
+        );
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to delete device");
+        throw err;
+      }
+    },
+    [withTokenRefresh],
+  );
+
   const markAlertRead = useCallback(
     async (alertId: number) => {
       try {
@@ -198,6 +249,10 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
       setError(err instanceof Error ? err.message : "Failed to mark alerts");
     }
   }, [withTokenRefresh]);
+
+  const getDeviceOnlineStatus = useCallback((device: Device) => {
+    return isDeviceOnlineStatus(device);
+  }, []);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -248,6 +303,37 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(interval);
   }, [isAuthenticated, loadReadings, selectedDeviceId]);
 
+  // Update device online/offline status every second based on 5-second rule
+  useEffect(() => {
+    if (!isAuthenticated || devices.length === 0) return;
+
+    const updateDeviceStatus = () => {
+      setDevices((currentDevices) =>
+        currentDevices.map((device) => {
+          const isOnline = isDeviceOnlineStatus(device);
+          const currentStatus = device.status === "online";
+          if (isOnline !== currentStatus) {
+            return { ...device, status: isOnline ? "online" : "offline", is_online: isOnline };
+          }
+          return device;
+        })
+      );
+
+      setSelectedDevice((currentSelected) => {
+        if (!currentSelected) return null;
+        const isOnline = isDeviceOnlineStatus(currentSelected);
+        const currentStatus = currentSelected.status === "online";
+        if (isOnline !== currentStatus) {
+          return { ...currentSelected, status: isOnline ? "online" : "offline", is_online: isOnline };
+        }
+        return currentSelected;
+      });
+    };
+
+    const interval = setInterval(updateDeviceStatus, 1000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, devices.length]);
+
   const current = useMemo<CurrentReading | null>(() => {
     if (readings.length === 0) return null;
     const latest = readings[0];
@@ -275,7 +361,7 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     readings,
     alerts,
     current,
-    isDeviceOnline: selectedDevice?.is_online ?? false,
+    isDeviceOnline: isDeviceOnlineStatus(selectedDevice),
     deviceName: selectedDevice?.device_name ?? "No device selected",
     deviceId: selectedDevice?.device_id ?? "N/A",
     lastUpdated,
@@ -289,6 +375,9 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     loadAlerts,
     refreshData,
     createDevice,
+    updateDevice,
+    deleteDevice,
+    getDeviceOnlineStatus,
     markAlertRead,
     markAllAlertsRead,
   };
