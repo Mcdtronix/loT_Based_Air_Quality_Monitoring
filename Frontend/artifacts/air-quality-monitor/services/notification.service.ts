@@ -325,13 +325,16 @@ export class NotificationService {
    */
   static show(config: Omit<ToastConfig, 'id'>) {
     const id = `notification-${Date.now()}-${Math.random()}`;
+    
+    // Normalize type to uppercase for TOAST_DEFAULTS lookup
+    const typeKey = (config.type || 'info').toUpperCase() as keyof typeof TOAST_DEFAULTS;
 
     const fullConfig: ToastConfig = {
       ...config,
       id,
-      duration: config.duration ?? TOAST_DEFAULTS[config.type].duration,
-      haptics: config.haptics ?? TOAST_DEFAULTS[config.type].haptics,
-      sound: config.sound ?? TOAST_DEFAULTS[config.type].sound,
+      duration: config.duration ?? TOAST_DEFAULTS[typeKey]?.duration ?? 2500,
+      haptics: config.haptics ?? TOAST_DEFAULTS[typeKey]?.haptics ?? false,
+      sound: config.sound ?? TOAST_DEFAULTS[typeKey]?.sound ?? false,
     };
 
     this.notificationQueue.push(fullConfig);
