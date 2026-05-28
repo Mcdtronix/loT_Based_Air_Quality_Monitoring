@@ -14,8 +14,10 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import Toast from "@/components/Toast";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import { DeviceProvider } from "@/context/DeviceContext";
+import NotificationService from "@/services/notification.service";
 
 SplashScreen.preventAutoHideAsync();
 
@@ -58,6 +60,11 @@ export default function RootLayout() {
     }
   }, [fontsLoaded, fontError]);
 
+  // ✅ Initialize notification service
+  useEffect(() => {
+    NotificationService.initialize();
+  }, []);
+
   if (!fontsLoaded && !fontError) return null;
 
   return (
@@ -69,6 +76,8 @@ export default function RootLayout() {
               <AuthProvider>
                 <DeviceProvider>
                   <RootLayoutNav />
+                  {/* ✅ Toast notification overlay */}
+                  <Toast />
                 </DeviceProvider>
               </AuthProvider>
             </KeyboardProvider>

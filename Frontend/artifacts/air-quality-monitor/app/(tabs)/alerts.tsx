@@ -1,6 +1,6 @@
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
-import React from "react";
+import React, { useMemo, useState } from "react";
 import {
   FlatList,
   Platform,
@@ -12,6 +12,9 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Alert, useDevice } from "@/context/DeviceContext";
 import { useColors } from "@/hooks/useColors";
+import { sortAlerts, filterAlerts, calculateAlertStats, formatAlertTime, getAlertAction } from "@/services/alert.service";
+
+type AlertFilter = "all" | "unread" | "critical";
 
 function AlertItem({ alert, onRead }: { alert: Alert; onRead: () => void }) {
   const colors = useColors();
@@ -29,12 +32,8 @@ function AlertItem({ alert, onRead }: { alert: Alert; onRead: () => void }) {
       ? "alert-triangle"
       : "info";
 
-  const timeStr = new Date(alert.timestamp).toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const relativeTime = formatAlertTime(alert.timestamp);
+  const recommendation = getAlertAction(alert.type);
 
   return (
     <TouchableOpacity
@@ -44,6 +43,7 @@ function AlertItem({ alert, onRead }: { alert: Alert; onRead: () => void }) {
           backgroundColor: colors.card,
           borderColor: alert.read ? colors.border : `${alertColor}40`,
           borderLeftColor: alertColor,
+          opacity: alert.read ? 0.6 : 1,
         },
       ]}
       onPress={onRead}
@@ -55,11 +55,16 @@ function AlertItem({ alert, onRead }: { alert: Alert; onRead: () => void }) {
       <View style={styles.alertContent}>
         <View style={styles.alertTopRow}>
           <Text style={[styles.alertType, { color: alertColor }]}>
-            {alert.type === "danger" ? "Danger" : alert.type === "warning" ? "Warning" : "Info"}
+            {alert.type === "danger" ? "🚨 DANGER" : alert.type === "warning" ? "⚠️ WARNING" : "ℹ️ INFO"}
           </Text>
-          <Text style={[styles.alertTime, { color: colors.mutedForeground }]}>{timeStr}</Text>
+          <Text style={[styles.alertTime, { color: colors.mutedForeground }]}>{relativeTime}</Text>
         </View>
-        <Text style={[styles.alertMsg, { color: colors.foreground }]}>{alert.message}</Text>
+        <Text style={[styles.alertMsg, { color: colors.foreground }]} numberOfLines={2}>
+          {alert.message}
+        </Text>
+        <Text style={[styles.alertRecommendation, { color: colors.mutedForeground }]} numberOfLines={1}>
+          {recommendation}
+        </Text>
         <View style={styles.alertBottom}>
           <View style={[styles.aqiBadge, { backgroundColor: `${alertColor}15` }]}>
             <Text style={[styles.aqiBadgeText, { color: alertColor }]}>AQI: {alert.aqi}</Text>
@@ -73,32 +78,102 @@ function AlertItem({ alert, onRead }: { alert: Alert; onRead: () => void }) {
   );
 }
 
+function FilterButton({
+  label,
+  isActive,
+  onPress,
+  count,
+  colors,
+}: {
+  label: string;
+  isActive: boolean;
+  onPress: () => void;
+  count?: number;
+  colors: any;
+}) {
+  return (
+    <TouchableOpacity
+      style={[
+        styles.filterBtn,
+        {
+          backgroundColor: isActive ? colors.primary : colors.card,
+          borderColor: isActive ? colors.primary : colors.border,
+        },
+      ]}
+      onPress={onPress}
+    >
+      <Text
+        style={[
+          styles.filterBtnText,
+          {
+            color: isActive ? colors.background : colors.foreground,
+            fontFamily: isActive ? "Inter_600SemiBold" : "Inter_500Medium",
+          },
+        ]}
+      >
+        {label}
+        {count !== undefined && count > 0 ? ` (${count})` : ""}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
 export default function AlertsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const { alerts, markAlertRead, markAllAlertsRead, unreadAlerts } = useDevice();
   const topPad = insets.top + (Platform.OS === "web" ? 67 : 0);
 
+  // ✅ State for filtering and sorting
+  const [activeFilter, setActiveFilter] = useState<AlertFilter>("unread");
+
+  // ✅ Calculate statistics
+  const stats = useMemo(() => calculateAlertStats(alerts), [alerts]);
+  
+  // ✅ Apply filtering and sorting
+  const filteredAndSortedAlerts = useMemo(() => {
+    let filtered = alerts;
+
+    switch (activeFilter) {
+      case "unread":
+        filtered = alerts.filter((a) => !a.read);
+        break;
+      case "critical":
+        filtered = alerts.filter((a) => a.type === "danger" && !a.read);
+        break;
+      case "all":
+      default:
+        filtered = alerts;
+        break;
+    }
+
+    return sortAlerts(filtered);
+  }, [alerts, activeFilter]);
+
   const handleMarkAll = () => {
     markAllAlertsRead();
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
   };
 
+  const handleAlertPress = (alertId: number) => {
+    markAlertRead(alertId);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
+      {/* Header with title and stats */}
       <View
         style={[
           styles.header,
           { paddingTop: topPad + 12, borderBottomColor: colors.border, backgroundColor: colors.background },
         ]}
       >
-        <View>
+        <View style={styles.headerLeft}>
           <Text style={[styles.pageTitle, { color: colors.foreground }]}>Alerts</Text>
-          {unreadAlerts > 0 && (
-            <Text style={[styles.pageSub, { color: colors.mutedForeground }]}>
-              {unreadAlerts} unread notification{unreadAlerts > 1 ? "s" : ""}
-            </Text>
-          )}
+          <Text style={[styles.pageSub, { color: colors.mutedForeground }]}>
+            {stats.unread} unread • {stats.total} total
+          </Text>
         </View>
         {unreadAlerts > 0 && (
           <TouchableOpacity
@@ -111,8 +186,36 @@ export default function AlertsScreen() {
         )}
       </View>
 
+      {/* Filter buttons */}
+      <View style={[styles.filterContainer, { borderBottomColor: colors.border }]}>
+        <View style={styles.filterScroll}>
+          <FilterButton
+            label="Unread"
+            isActive={activeFilter === "unread"}
+            onPress={() => setActiveFilter("unread")}
+            count={stats.unread}
+            colors={colors}
+          />
+          <FilterButton
+            label="Critical"
+            isActive={activeFilter === "critical"}
+            onPress={() => setActiveFilter("critical")}
+            count={stats.critical}
+            colors={colors}
+          />
+          <FilterButton
+            label="All"
+            isActive={activeFilter === "all"}
+            onPress={() => setActiveFilter("all")}
+            count={stats.total}
+            colors={colors}
+          />
+        </View>
+      </View>
+
+      {/* Alerts list */}
       <FlatList
-        data={alerts}
+        data={filteredAndSortedAlerts}
         keyExtractor={(item) => String(item.id)}
         contentContainerStyle={[
           styles.list,
@@ -122,7 +225,7 @@ export default function AlertsScreen() {
         ]}
         ItemSeparatorComponent={() => <View style={{ height: 8 }} />}
         renderItem={({ item }) => (
-          <AlertItem alert={item} onRead={() => markAlertRead(item.id)} />
+          <AlertItem alert={item} onRead={() => handleAlertPress(item.id)} />
         )}
         ListEmptyComponent={
           <View style={styles.emptyState}>
@@ -130,15 +233,17 @@ export default function AlertsScreen() {
               <Feather name="bell-off" size={40} color={colors.success} />
             </View>
             <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
-              No Alerts
+              {activeFilter === "critical" ? "No Critical Alerts" : "All Caught Up!"}
             </Text>
             <Text style={[styles.emptySub, { color: colors.mutedForeground }]}>
-              You're all clear! Alerts will appear here when air quality changes significantly.
+              {activeFilter === "critical"
+                ? "No critical alerts. Air quality is stable."
+                : "No alerts to display. Air quality looks good!"}
             </Text>
           </View>
         }
         showsVerticalScrollIndicator={false}
-        scrollEnabled={alerts.length > 0}
+        scrollEnabled={filteredAndSortedAlerts.length > 0}
       />
     </View>
   );
@@ -155,6 +260,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
+  },
+  headerLeft: {
+    flex: 1,
   },
   pageTitle: {
     fontFamily: "Inter_700Bold",
@@ -177,6 +285,28 @@ const styles = StyleSheet.create({
   markAllText: {
     fontFamily: "Inter_600SemiBold",
     fontSize: 13,
+  },
+  // ✅ Filter styles
+  filterContainer: {
+    borderBottomWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  filterScroll: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  filterBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  filterBtnText: {
+    fontSize: 12,
+    lineHeight: 16,
   },
   list: {
     padding: 16,
@@ -217,9 +347,16 @@ const styles = StyleSheet.create({
     fontSize: 11,
   },
   alertMsg: {
-    fontFamily: "Inter_400Regular",
+    fontFamily: "Inter_500Medium",
     fontSize: 13,
     lineHeight: 18,
+  },
+  // ✅ New recommendation style
+  alertRecommendation: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 12,
+    lineHeight: 16,
+    fontStyle: "italic",
   },
   alertBottom: {
     flexDirection: "row",

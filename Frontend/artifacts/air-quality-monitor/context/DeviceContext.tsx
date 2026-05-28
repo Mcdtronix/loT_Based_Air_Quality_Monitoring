@@ -3,6 +3,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { useAuth } from "./AuthContext";
 import { alertApi, deviceApi, readingApi } from "../services/api.service";
 import type { Alert as ApiAlert, Device as ApiDevice, SensorReading as ApiReading } from "../services/api.service";
+import { useAlertNotifications } from "../hooks/useAlertNotifications";
 
 export interface Device extends ApiDevice {}
 export interface SensorReading extends ApiReading {}
@@ -50,6 +51,10 @@ const LIVE_REFRESH_BACKOFF_MS = 15000;
 const LIVE_REFRESH_FAILURES_BEFORE_BACKOFF = 3;
 const DEVICE_OFFLINE_THRESHOLD_MS = 5000; // 5 seconds without data = offline
 
+// Alert polling configuration
+const ALERT_POLL_INTERVAL_MS = 5000; // Poll for new alerts every 5 seconds
+const ALERT_POLL_BACKOFF_MS = 30000; // Backoff to 30 seconds on repeated failures
+
 function getAqiMeta(aqi: number): { level: string; color: string } {
   if (aqi <= 50) return { level: "Good", color: "#22c55e" };
   if (aqi <= 100) return { level: "Moderate", color: "#f59e0b" };
@@ -82,6 +87,11 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
   const liveRefreshFailures = useRef(0);
   const liveRefreshBackoffUntil = useRef(0);
   const selectedDeviceId = selectedDevice?.id;
+
+  // Alert polling state
+  const alertPollInFlight = useRef(false);
+  const alertPollFailures = useRef(0);
+  const alertPollBackoffUntil = useRef(0);
 
   const withTokenRefresh = useCallback(
     async <T,>(fn: (token: string) => Promise<T>): Promise<T> => {
@@ -334,6 +344,33 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(interval);
   }, [isAuthenticated, devices.length]);
 
+  // ✅ Real-time alert polling - check for new/updated alerts every 5 seconds
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const pollAlerts = async () => {
+      if (alertPollInFlight.current) return;
+      if (Date.now() < alertPollBackoffUntil.current) return;
+
+      alertPollInFlight.current = true;
+      try {
+        await loadAlerts();
+        alertPollFailures.current = 0;
+        alertPollBackoffUntil.current = 0;
+      } catch (err) {
+        alertPollFailures.current += 1;
+        if (alertPollFailures.current >= 3) {
+          alertPollBackoffUntil.current = Date.now() + ALERT_POLL_BACKOFF_MS;
+        }
+      } finally {
+        alertPollInFlight.current = false;
+      }
+    };
+
+    const interval = setInterval(pollAlerts, ALERT_POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, loadAlerts]);
+
   const current = useMemo<CurrentReading | null>(() => {
     if (readings.length === 0) return null;
     const latest = readings[0];
@@ -354,6 +391,13 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
         minute: "2-digit",
       })
     : "";
+
+  // ✅ Trigger notifications when new alerts arrive
+  useAlertNotifications(alerts, {
+    enableCriticalAlerts: true,
+    enableWarningAlerts: true,
+    enableInfoAlerts: true,
+  });
 
   const value: DeviceContextValue = {
     devices,
