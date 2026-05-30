@@ -1,0 +1,489 @@
+/**
+ * ============================================================
+ *  AIR QUALITY MONITORING SYSTEM — ESP32 Firmware
+ *  Version   : 1.0.0
+ *  Author    : IoT Systems
+ *  Target    : ESP32 DevKit
+ *  Backend   : Django REST API
+ * ============================================================
+ *
+ *  SENSORS:
+ *    - DHT22       → Temperature & Humidity        (D4)
+ *    - MQ-135      → CO2, NOx, CO approximation    (D34 analog)
+ *    - GP2Y1010    → Dust / PM2.5                  (D32 LED, D33 analog)
+ *
+ *  DATA ENDPOINT:
+ *    POST http://<DJANGO_HOST>/api/readings/upload/
+ *    Interval: every 3 seconds
+ * ============================================================
+ */
+
+// ─────────────────────────────────────────────────────────────
+//  LIBRARIES
+// ─────────────────────────────────────────────────────────────
+#include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+
+// ─────────────────────────────────────────────────────────────
+//  USER CONFIGURATION  ← Edit these before uploading
+// ─────────────────────────────────────────────────────────────
+const char* WIFI_SSID       = "Tengarako_data";
+const char* WIFI_PASSWORD   = "aqi16@khayz1";
+const char* DJANGO_ENDPOINT = "https://airmonitor.mcdtronix.co.zw/api/readings/upload/";
+const char* DEVICE_NAME     = "DEVICE_001";
+
+// ─────────────────────────────────────────────────────────────
+//  PIN DEFINITIONS
+// ─────────────────────────────────────────────────────────────
+#define DHT_PIN           4     // D4  — DHT22 data
+#define DHT_TYPE          DHT22
+
+#define MQ135_AO_PIN      34    // D34 — MQ-135 analog out (input only pin)
+
+#define DUST_LED_PIN      32    // D32 — GP2Y1010 LED pulse control
+#define DUST_AO_PIN       33    // D33 — GP2Y1010 analog out
+
+// ─────────────────────────────────────────────────────────────
+//  CONSTANTS
+// ─────────────────────────────────────────────────────────────
+#define SEND_INTERVAL_MS       3000    // POST every 3 seconds
+#define WIFI_TIMEOUT_MS        15000   // WiFi connect timeout
+#define HTTP_TIMEOUT_MS        5000    // HTTP request timeout
+
+// DHT22 valid range guards
+#define TEMP_MIN              -40.0
+#define TEMP_MAX               80.0
+#define HUM_MIN                0.0
+#define HUM_MAX               100.0
+
+// MQ-135 ADC to gas approximation constants
+// NOTE: These are linear approximations. For calibrated ppm,
+//       use the MQUnifiedsensor library with your R0 value.
+#define MQ135_ADC_MAX         4095.0   // ESP32 12-bit ADC
+#define CO2_PPM_CLEAN         400.0    // baseline CO2 in clean air
+#define CO2_PPM_MAX           5000.0
+#define CO_PPM_MAX            50.0
+#define NOX_PPM_MAX           0.5
+
+// GP2Y1010 dust sensor timing (microseconds)
+#define DUST_LED_PULSE_US     280      // LED on time before sampling
+#define DUST_SAMPLE_DELAY_US  40       // wait after LED on before ADC read
+#define DUST_LED_OFF_DELAY_US 9680     // LED off period
+
+// Dust sensor calibration
+#define DUST_VOLTAGE_REF      3.3
+#define DUST_ADC_RESOLUTION   4095.0
+#define DUST_NO_DUST_VOLTAGE  0.6      // Vo when air is clean (volts)
+#define DUST_SENSITIVITY      0.5      // V per 100 µg/m³
+
+// ─────────────────────────────────────────────────────────────
+//  OBJECTS
+// ─────────────────────────────────────────────────────────────
+DHT               dht(DHT_PIN, DHT_TYPE);
+LiquidCrystal_I2C lcd(0x27, 16, 2);    // Change to 0x3F if blank
+
+// ─────────────────────────────────────────────────────────────
+//  SENSOR DATA STRUCTURE
+// ─────────────────────────────────────────────────────────────
+struct SensorReading {
+  String  device_name;
+  float   pm25;
+  float   pm10;
+  float   co2;
+  float   carbon_monoxide;
+  float   nitrogen_oxide;
+  float   humidity;
+  float   temperature;
+  float   dust;
+  bool    dht_valid;
+  bool    mq135_valid;
+  bool    dust_valid;
+};
+
+// ─────────────────────────────────────────────────────────────
+//  GLOBAL STATE
+// ─────────────────────────────────────────────────────────────
+unsigned long lastSendTime    = 0;
+unsigned long totalSent       = 0;
+unsigned long totalFailed     = 0;
+bool          wifiConnected   = false;
+
+// ─────────────────────────────────────────────────────────────
+//  FUNCTION DECLARATIONS
+// ─────────────────────────────────────────────────────────────
+bool          connectWiFi();
+SensorReading readAllSensors();
+float         readDustSensor();
+float         mq135ToGas(int rawADC, float scaleFactor);
+bool          validateReading(SensorReading& r);
+bool          postToBackend(const SensorReading& r);
+void          displayOnLCD(const SensorReading& r, bool postSuccess);
+void          logToSerial(const SensorReading& r, bool postSuccess, int httpCode);
+void          lcdStatus(String line1, String line2);
+String        buildJSON(const SensorReading& r);
+
+// ─────────────────────────────────────────────────────────────
+//  SETUP
+// ─────────────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  Serial.println();
+  Serial.println("============================================");
+  Serial.println("  AIR QUALITY MONITORING SYSTEM v1.0.0");
+  Serial.println("============================================");
+
+  // Init LCD
+  lcd.init();
+  lcd.backlight();
+  lcdStatus("AQI Monitor", "Booting...");
+
+  // Init pins
+  pinMode(DUST_LED_PIN, OUTPUT);
+  digitalWrite(DUST_LED_PIN, LOW);
+
+  // Init DHT22
+  dht.begin();
+  Serial.println("[INIT] DHT22 initialised on D4");
+
+  // Init MQ-135 — ADC pin, no pinMode needed for input-only D34
+  Serial.println("[INIT] MQ-135 on D34 (ADC)");
+  Serial.println("[INIT] Warming up MQ-135 sensor... (20s)");
+  lcdStatus("MQ-135 Warmup", "Please wait 20s");
+
+  // MQ-135 requires ~20s preheat for stable readings
+  for (int i = 20; i > 0; i--) {
+    Serial.printf("[WARMUP] %d seconds remaining\n", i);
+    delay(1000);
+  }
+
+  // Connect WiFi
+  lcdStatus("Connecting", "WiFi...");
+  wifiConnected = connectWiFi();
+
+  lcdStatus("System Ready", wifiConnected ? "WiFi: OK" : "WiFi: OFFLINE");
+  delay(1500);
+
+  Serial.println("[INIT] System ready. Starting main loop.");
+  Serial.println("============================================\n");
+}
+
+// ─────────────────────────────────────────────────────────────
+//  MAIN LOOP
+// ─────────────────────────────────────────────────────────────
+void loop() {
+  unsigned long now = millis();
+
+  if (now - lastSendTime >= SEND_INTERVAL_MS) {
+    lastSendTime = now;
+
+    Serial.println("\n──────────────── CYCLE ────────────────");
+
+    // 1. Read all sensors
+    SensorReading reading = readAllSensors();
+
+    // 2. Validate readings
+    bool valid = validateReading(reading);
+
+    // 3. Attempt HTTP POST
+    bool postSuccess = false;
+    int  httpCode    = 0;
+
+    if (!wifiConnected) {
+      Serial.println("[WIFI] Not connected. Attempting reconnect...");
+      wifiConnected = connectWiFi();
+    }
+
+    if (wifiConnected) {
+      postSuccess = postToBackend(reading);
+      if (postSuccess) totalSent++;
+      else             totalFailed++;
+    } else {
+      Serial.println("[WIFI] Still offline. Skipping HTTP POST.");
+    }
+
+    // 4. Log everything to Serial
+    logToSerial(reading, postSuccess, httpCode);
+
+    // 5. Update LCD
+    displayOnLCD(reading, postSuccess);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  WiFi CONNECTION
+// ─────────────────────────────────────────────────────────────
+bool connectWiFi() {
+  Serial.printf("[WIFI] Connecting to SSID: %s\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - start > WIFI_TIMEOUT_MS) {
+      Serial.println("[WIFI] ❌ Connection TIMEOUT");
+      return false;
+    }
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.printf("[WIFI] ✅ Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+  Serial.printf("[WIFI] Signal strength (RSSI): %d dBm\n", WiFi.RSSI());
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  READ ALL SENSORS
+// ─────────────────────────────────────────────────────────────
+SensorReading readAllSensors() {
+  SensorReading r;
+  r.device_name = DEVICE_NAME;
+
+  // ── DHT22 ─────────────────────────────────
+  float temp = dht.readTemperature();
+  float hum  = dht.readHumidity();
+
+  if (isnan(temp) || isnan(hum)) {
+    Serial.println("[DHT22] ⚠️  Read FAILED — sending 0.00");
+    r.temperature = 0.00;
+    r.humidity    = 0.00;
+    r.dht_valid   = false;
+  } else {
+    r.temperature = temp;
+    r.humidity    = hum;
+    r.dht_valid   = true;
+  }
+
+  // ── MQ-135 ────────────────────────────────
+  int mq135Raw = analogRead(MQ135_AO_PIN);
+
+  if (mq135Raw <= 0 || mq135Raw >= 4095) {
+    Serial.println("[MQ135] ⚠️  Invalid ADC read — sending 0.00");
+    r.co2             = 0.00;
+    r.carbon_monoxide = 0.00;
+    r.nitrogen_oxide  = 0.00;
+    r.mq135_valid     = false;
+  } else {
+    // Approximate gas concentrations from raw ADC
+    // Higher ADC = higher gas concentration
+    float ratio = mq135Raw / MQ135_ADC_MAX;
+
+    r.co2             = CO2_PPM_CLEAN + (ratio * (CO2_PPM_MAX - CO2_PPM_CLEAN));
+    r.carbon_monoxide = ratio * CO_PPM_MAX;
+    r.nitrogen_oxide  = ratio * NOX_PPM_MAX;
+    r.mq135_valid     = true;
+  }
+
+  // MQ-135 does NOT directly measure PM2.5 or PM10
+  // These require the GP2Y1010 dust sensor
+  // Set to 0.00 until dust sensor is reconnected
+  r.pm25 = 0.00;
+  r.pm10 = 0.00;
+  r.dust = 0.00;
+  r.dust_valid = false;
+
+  // ── Uncomment below when dust sensor is reconnected ──
+  /*
+  float dustConc = readDustSensor();
+  if (dustConc < 0) {
+    Serial.println("[DUST] ⚠️  Read FAILED — sending 0.00");
+    r.dust       = 0.00;
+    r.pm25       = 0.00;
+    r.pm10       = 0.00;
+    r.dust_valid = false;
+  } else {
+    r.dust       = dustConc;
+    r.pm25       = dustConc * 0.8;   // PM2.5 approx fraction of total dust
+    r.pm10       = dustConc * 1.2;   // PM10  approx (coarser particles)
+    r.dust_valid = true;
+  }
+  */
+
+  return r;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  DUST SENSOR READ  (GP2Y1010AU0F)
+// ─────────────────────────────────────────────────────────────
+float readDustSensor() {
+  // Pulse LED, sample ADC, convert to µg/m³
+  digitalWrite(DUST_LED_PIN, HIGH);
+  delayMicroseconds(DUST_LED_PULSE_US);
+
+  int rawADC = analogRead(DUST_AO_PIN);
+
+  delayMicroseconds(DUST_SAMPLE_DELAY_US);
+  digitalWrite(DUST_LED_PIN, LOW);
+  delayMicroseconds(DUST_LED_OFF_DELAY_US);
+
+  if (rawADC <= 0 || rawADC >= 4095) return -1.0;
+
+  float voltage    = (rawADC / DUST_ADC_RESOLUTION) * DUST_VOLTAGE_REF;
+  float dustConc   = (voltage - DUST_NO_DUST_VOLTAGE) / DUST_SENSITIVITY * 100.0;
+
+  if (dustConc < 0) dustConc = 0.0;
+
+  return dustConc;  // µg/m³
+}
+
+// ─────────────────────────────────────────────────────────────
+//  VALIDATION
+// ─────────────────────────────────────────────────────────────
+bool validateReading(SensorReading& r) {
+  bool allValid = true;
+
+  // Temperature range check
+  if (r.dht_valid && (r.temperature < TEMP_MIN || r.temperature > TEMP_MAX)) {
+    Serial.printf("[VALID] ⚠️  Temperature out of range: %.2f°C — clamping to 0.00\n", r.temperature);
+    r.temperature = 0.00;
+    r.dht_valid   = false;
+    allValid      = false;
+  }
+
+  // Humidity range check
+  if (r.dht_valid && (r.humidity < HUM_MIN || r.humidity > HUM_MAX)) {
+    Serial.printf("[VALID] ⚠️  Humidity out of range: %.2f%% — clamping to 0.00\n", r.humidity);
+    r.humidity  = 0.00;
+    r.dht_valid = false;
+    allValid    = false;
+  }
+
+  // Negative gas values guard
+  if (r.co2 < 0)             { r.co2             = 0.00; allValid = false; }
+  if (r.carbon_monoxide < 0) { r.carbon_monoxide  = 0.00; allValid = false; }
+  if (r.nitrogen_oxide < 0)  { r.nitrogen_oxide   = 0.00; allValid = false; }
+  if (r.dust < 0)            { r.dust             = 0.00; allValid = false; }
+  if (r.pm25 < 0)            { r.pm25             = 0.00; allValid = false; }
+  if (r.pm10 < 0)            { r.pm10             = 0.00; allValid = false; }
+
+  if (allValid) {
+    Serial.println("[VALID] ✅ All readings passed validation");
+  } else {
+    Serial.println("[VALID] ⚠️  Some readings failed validation — invalid fields set to 0.00");
+  }
+
+  return allValid;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  BUILD JSON PAYLOAD
+// ─────────────────────────────────────────────────────────────
+String buildJSON(const SensorReading& r) {
+  StaticJsonDocument<512> doc;
+
+  doc["device_name"]      = r.device_name;
+  doc["pm25"]             = serialized(String(r.pm25,             2));
+  doc["pm10"]             = serialized(String(r.pm10,             2));
+  doc["co2"]              = serialized(String(r.co2,              2));
+  doc["carbon_monoxide"]  = serialized(String(r.carbon_monoxide,  2));
+  doc["nitrogen_oxide"]   = serialized(String(r.nitrogen_oxide,   4));
+  doc["humidity"]         = serialized(String(r.humidity,         2));
+  doc["temperature"]      = serialized(String(r.temperature,      2));
+  doc["dust"]             = serialized(String(r.dust,             2));
+
+  String payload;
+  serializeJson(doc, payload);
+  return payload;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  HTTP POST TO DJANGO
+// ─────────────────────────────────────────────────────────────
+bool postToBackend(const SensorReading& r) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[HTTP] ❌ WiFi disconnected — cannot POST");
+    return false;
+  }
+
+  String payload = buildJSON(r);
+
+  Serial.println("[HTTP] Sending payload:");
+  Serial.println(payload);
+
+  HTTPClient http;
+  http.begin(DJANGO_ENDPOINT);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Accept",       "application/json");
+  http.setTimeout(HTTP_TIMEOUT_MS);
+
+  int httpCode = http.POST(payload);
+
+  if (httpCode > 0) {
+    String response = http.getString();
+
+    if (httpCode == 200 || httpCode == 201) {
+      Serial.printf("[HTTP] ✅ SUCCESS — HTTP %d\n", httpCode);
+      Serial.printf("[HTTP] Response: %s\n", response.c_str());
+      http.end();
+      return true;
+    } else {
+      Serial.printf("[HTTP] ⚠️  Server returned HTTP %d\n", httpCode);
+      Serial.printf("[HTTP] Response: %s\n", response.c_str());
+      http.end();
+      return false;
+    }
+  } else {
+    Serial.printf("[HTTP] ❌ POST FAILED — Error: %s\n", http.errorToString(httpCode).c_str());
+    http.end();
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  SERIAL LOG
+// ─────────────────────────────────────────────────────────────
+void logToSerial(const SensorReading& r, bool postSuccess, int httpCode) {
+  Serial.println("\n┌─────────────────────────────────────┐");
+  Serial.printf( "│  DEVICE   : %-24s│\n", r.device_name.c_str());
+  Serial.println("├─────────────────────────────────────┤");
+  Serial.printf( "│  Temp     : %-6.2f °C  %s         │\n", r.temperature, r.dht_valid   ? "✅" : "⚠️ ");
+  Serial.printf( "│  Humidity : %-6.2f %%   %s         │\n", r.humidity,    r.dht_valid   ? "✅" : "⚠️ ");
+  Serial.printf( "│  CO2      : %-8.2f ppm %s       │\n",   r.co2,         r.mq135_valid ? "✅" : "⚠️ ");
+  Serial.printf( "│  CO       : %-8.4f ppm %s       │\n",   r.carbon_monoxide, r.mq135_valid ? "✅" : "⚠️ ");
+  Serial.printf( "│  NOx      : %-8.4f ppm %s       │\n",   r.nitrogen_oxide,  r.mq135_valid ? "✅" : "⚠️ ");
+  Serial.printf( "│  Dust     : %-6.2f µg/m³ %s      │\n",  r.dust,        r.dust_valid  ? "✅" : "⚠️ ");
+  Serial.printf( "│  PM2.5    : %-6.2f µg/m³ %s      │\n",  r.pm25,        r.dust_valid  ? "✅" : "⚠️ ");
+  Serial.printf( "│  PM10     : %-6.2f µg/m³ %s      │\n",  r.pm10,        r.dust_valid  ? "✅" : "⚠️ ");
+  Serial.println("├─────────────────────────────────────┤");
+  Serial.printf( "│  POST     : %-27s│\n", postSuccess ? "✅ SUCCESS" : "❌ FAILED");
+  Serial.printf( "│  Sent OK  : %-5lu  │  Failed: %-5lu    │\n", totalSent, totalFailed);
+  Serial.println("└─────────────────────────────────────┘");
+}
+
+// ─────────────────────────────────────────────────────────────
+//  LCD DISPLAY
+// ─────────────────────────────────────────────────────────────
+void displayOnLCD(const SensorReading& r, bool postSuccess) {
+  lcd.clear();
+
+  // Row 0: Temperature & Humidity
+  lcd.setCursor(0, 0);
+  lcd.print("T:");
+  lcd.print(r.temperature, 1);
+  lcd.print((char)223);    // ° symbol
+  lcd.print("C H:");
+  lcd.print(r.humidity, 0);
+  lcd.print("%");
+
+  // Row 1: CO2 and POST status
+  lcd.setCursor(0, 1);
+  lcd.print("CO2:");
+  lcd.print(r.co2, 0);
+  lcd.print("  ");
+  lcd.print(postSuccess ? "OK" : "ERR");
+}
+
+void lcdStatus(String line1, String line2) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(line1.substring(0, 16));
+  lcd.setCursor(0, 1);
+  lcd.print(line2.substring(0, 16));
+}

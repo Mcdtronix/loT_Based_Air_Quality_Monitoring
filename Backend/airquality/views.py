@@ -26,6 +26,7 @@ from .serializers import (
     TwoFactorRequestSerializer,
     TwoFactorVerifySerializer,
 )
+from .alert_service import AlertService
 
 
 def build_auth_user_payload(user):
@@ -189,6 +190,16 @@ class SensorReadingViewSet(viewsets.ModelViewSet):
         device.save(update_fields=['is_online', 'last_updated'])
         logger.debug(f"[DB_UPDATE] Device - Device: {device.device_name} (ID: {device.id}), "
                     f"is_online: {device.is_online}, last_updated: {device.last_updated}")
+
+        # ✅ Generate alert if air quality degraded
+        try:
+            alert = AlertService.process_reading(reading)
+            if alert:
+                logger.info(f"[ALERT] Alert triggered for {device.device_name}: {alert.message}")
+            else:
+                logger.debug(f"[ALERT] No alert generated for {device.device_name} (AQI: {reading.aqi})")
+        except Exception as e:
+            logger.error(f"[ALERT_ERROR] Failed to process alert for {device.device_name}: {str(e)}", exc_info=True)
 
         return Response(SensorReadingSerializer(reading).data, status=response_status)
 

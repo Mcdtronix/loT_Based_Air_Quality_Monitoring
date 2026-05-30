@@ -56,6 +56,7 @@ class Device(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
+        ordering = ['-created_at']
         constraints = [
             models.UniqueConstraint(fields=['user', 'device_name'], name='unique_device_name_per_user'),
         ]
