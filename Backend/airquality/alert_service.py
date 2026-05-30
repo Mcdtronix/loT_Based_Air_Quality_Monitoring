@@ -197,51 +197,84 @@ class AlertService:
         Returns:
             Created Alert object if alert generated, None otherwise
         """
-        device = reading.device
-        current_aqi = reading.aqi
-        
-        # Get previous reading for trend analysis
-        previous_reading = SensorReading.objects.filter(
-            device=device,
-            timestamp__lt=reading.timestamp
-        ).order_by('-timestamp').first()
-        
-        previous_aqi = previous_reading.aqi if previous_reading else current_aqi
-        
-        # Determine if trend warrants alert
-        should_alert, alert_type, reason = AlertService.should_alert_on_trend_change(
-            device, current_aqi, previous_aqi
-        )
-        
-        # For first reading, also alert if AQI is already at unhealthy levels
-        if not should_alert and not previous_reading and current_aqi >= 150:
-            # Generate initial warning for already-unhealthy air
-            current_level, _ = AlertService.get_aqi_level(current_aqi)
-            should_alert = True
-            alert_type = "warning" if current_aqi < 200 else "danger"
-            reason = f"Initial reading: {current_level}"
-        
-        if not should_alert:
-            logger.debug(
-                f"[ALERT] No alert needed for {device.device_name} — "
-                f"AQI: {current_aqi}, Trend stable"
+        try:
+            device = reading.device
+            current_aqi = reading.aqi
+            
+            # Log the starting point
+            logger.info(
+                f"[ALERT_DEBUG] Processing reading for {device.device_name} "
+                f"(Device ID: {device.id}) — Current AQI: {current_aqi}"
+            )
+            
+            # Get previous reading for trend analysis
+            previous_reading = SensorReading.objects.filter(
+                device=device,
+                timestamp__lt=reading.timestamp
+            ).order_by('-timestamp').first()
+            
+            previous_aqi = previous_reading.aqi if previous_reading else current_aqi
+            
+            logger.info(
+                f"[ALERT_DEBUG] Previous AQI: {previous_aqi}, "
+                f"Previous reading exists: {previous_reading is not None}"
+            )
+            
+            # Determine if trend warrants alert
+            should_alert, alert_type, reason = AlertService.should_alert_on_trend_change(
+                device, current_aqi, previous_aqi
+            )
+            
+            logger.info(
+                f"[ALERT_DEBUG] Trend check — should_alert: {should_alert}, "
+                f"type: {alert_type}, reason: {reason}"
+            )
+            
+            # For first reading, also alert if AQI is already at unhealthy levels
+            if not should_alert and not previous_reading and current_aqi >= 150:
+                # Generate initial warning for already-unhealthy air
+                current_level, _ = AlertService.get_aqi_level(current_aqi)
+                should_alert = True
+                alert_type = "warning" if current_aqi < 200 else "danger"
+                reason = f"Initial reading: {current_level}"
+                logger.info(
+                    f"[ALERT_DEBUG] First reading with high AQI — "
+                    f"Triggering {alert_type} alert"
+                )
+            
+            if not should_alert:
+                logger.debug(
+                    f"[ALERT] No alert needed for {device.device_name} — "
+                    f"AQI: {current_aqi}, Trend stable"
+                )
+                return None
+            
+            # Check if alert should be suppressed
+            if AlertService.should_suppress_alert(device, alert_type):
+                logger.info(
+                    f"[ALERT_DEBUG] Alert suppressed for {device.device_name} — "
+                    f"Type: {alert_type}, Reason: Recent alert within suppression window"
+                )
+                return None
+            
+            # Construct detailed alert message
+            aqi_level, _ = AlertService.get_aqi_level(current_aqi)
+            message = f"{reason} (AQI: {previous_aqi} → {current_aqi}, Level: {aqi_level})"
+            
+            logger.info(
+                f"[ALERT_DEBUG] Creating {alert_type} alert — Message: {message}"
+            )
+            
+            # Create and persist alert
+            alert = AlertService.create_alert(device, alert_type, message, current_aqi)
+            return alert
+            
+        except Exception as e:
+            logger.error(
+                f"[ALERT_ERROR] Exception in process_reading: {str(e)}", 
+                exc_info=True
             )
             return None
-        
-        # Check if alert should be suppressed
-        if AlertService.should_suppress_alert(device, alert_type):
-            logger.debug(
-                f"[ALERT] Alert suppressed for {device.device_name} — "
-                f"Type: {alert_type}, Reason: {reason}"
-            )
-            return None
-        
-        # Construct detailed alert message
-        aqi_level, _ = AlertService.get_aqi_level(current_aqi)
-        message = f"{reason} (AQI: {previous_aqi} → {current_aqi}, Level: {aqi_level})"
-        
-        # Create and persist alert
-        alert = AlertService.create_alert(device, alert_type, message, current_aqi)
         
         return alert
     
